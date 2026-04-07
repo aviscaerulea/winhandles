@@ -26,14 +26,18 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $outExe = Join-Path $OutDir "winhandles.exe"
 
+# バージョン定義ヘッダを TEMP に生成（/D マクロのクォートエスケープ問題を回避）
+$versionH = Join-Path $env:TEMP "winhandles_version.h"
+Set-Content -Path $versionH -Value "#define VERSION_STR `"$Version`"" -Encoding utf8NoBOM
+
 $clArgs = @(
     "/utf-8", "/EHsc", "/O2", "/W4", "/WX", "/nologo", "/std:c++17",
-    "/DVERSION_STR=\`"$Version\`"",
+    "/FI$versionH",
     "winhandles.cpp",
     "/Fe:$outExe",
     "/link",
     "/SUBSYSTEM:WINDOWS", "/ENTRY:mainCRTStartup",
-    "psapi.lib", "advapi32.lib"
+    "psapi.lib", "advapi32.lib", "shell32.lib"
 )
 
 Write-Host "[ビルド] cl.exe $($clArgs -join ' ')"

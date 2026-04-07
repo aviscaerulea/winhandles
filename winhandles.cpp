@@ -19,6 +19,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#include <shellapi.h>
 #include <tlhelp32.h>
 #include <winternl.h>
 
@@ -161,6 +162,71 @@ static bool EnableDebugPrivilege()
     bool ok = (GetLastError() == ERROR_SUCCESS);
     CloseHandle(token);
     return ok;
+}
+
+// =============================================
+// 管理者権限で実行中かどうかを確認
+// =============================================
+static bool IsRunningAsAdmin()
+{
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = nullptr;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+
+    if (AllocateAndInitializeSid(&ntAuthority, 2,
+                                  SECURITY_BUILTIN_DOMAIN_RID,
+                                  DOMAIN_ALIAS_RID_ADMINS,
+                                  0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(nullptr, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+    return isAdmin != FALSE;
+}
+
+// =============================================
+// UAC 昇格して自プロセスを再起動
+//
+// 管理者権限で自プロセスを再起動する。昇格プロセスが元のコンソールへ
+// 接続できるよう --attach-console <PID> 引数を先頭に追加する。
+// 昇格プロセスの終了を待ち合わせて true を返す。
+// 昇格に失敗した場合（UAC 拒否等）は false を返す。
+// =============================================
+static bool TryElevateAndRelaunch(int argc, char* argv[])
+{
+    wchar_t exePath[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        return false;
+
+    // コンソール接続用に現在の PID を先頭引数として付与
+    std::wstring params = L"--attach-console " + std::to_wstring(GetCurrentProcessId());
+    for (int i = 1; i < argc; ++i) {
+        params += L' ';
+        std::wstring wa;
+        for (unsigned char c : std::string(argv[i]))
+            wa += static_cast<wchar_t>(c);
+        if (wa.find(L' ') != std::wstring::npos)
+            params += L'"' + wa + L'"';
+        else
+            params += wa;
+    }
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize       = sizeof(sei);
+    sei.fMask        = SEE_MASK_NOCLOSEPROCESS;
+    sei.hwnd         = nullptr;
+    sei.lpVerb       = L"runas";
+    sei.lpFile       = exePath;
+    sei.lpParameters = params.c_str();
+    sei.nShow        = SW_SHOW;
+
+    if (!ShellExecuteExW(&sei))
+        return false;
+
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        CloseHandle(sei.hProcess);
+    }
+    return true;
 }
 
 // =============================================
@@ -607,8 +673,48 @@ static void PrintHelp()
 // =============================================
 int main(int argc, char* argv[])
 {
+    // --- 昇格後コンソール接続（--attach-console PID） ---
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--attach-console" && i + 1 < argc) {
+            try {
+                DWORD parentPid = static_cast<DWORD>(std::stoul(argv[i + 1]));
+                FreeConsole();
+                if (AttachConsole(parentPid)) {
+                    FILE* fp;
+                    freopen_s(&fp, "CONOUT$", "w", stdout);
+                    freopen_s(&fp, "CONOUT$", "w", stderr);
+                    std::cout.clear();
+                    std::cerr.clear();
+                }
+            }
+            catch (...) {}
+            // 引数リストから --attach-console <PID> を除去
+            for (int j = i; j < argc - 2; ++j)
+                argv[j] = argv[j + 2];
+            argc -= 2;
+            break;
+        }
+    }
+
     // UTF-8 出力設定（コンソール・パイプどちらも正しく出力される）
     SetConsoleOutputCP(CP_UTF8);
+
+    // --help は昇格不要のため事前に処理
+    for (int i = 1; i < argc; ++i) {
+        std::string a(argv[i]);
+        if (a == "--help" || a == "-h") {
+            PrintHelp();
+            return 0;
+        }
+    }
+
+    // --- 管理者権限昇格 ---
+    // 非管理者の場合は UAC 昇格を試みる。失敗時は通常権限で続行する
+    if (!IsRunningAsAdmin()) {
+        if (TryElevateAndRelaunch(argc, argv))
+            return 0;
+        std::cerr << "警告：管理者権限での起動に失敗しました（通常権限で続行します）\n";
+    }
 
     // --- CLI 引数解析 ---
     size_t topN    = 20;
@@ -617,11 +723,7 @@ int main(int argc, char* argv[])
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
-        if (arg == "--help" || arg == "-h") {
-            PrintHelp();
-            return 0;
-        }
-        else if (arg == "--all") {
+        if (arg == "--all") {
             showAll = true;
         }
         else if (arg == "--top" && i + 1 < argc) {
