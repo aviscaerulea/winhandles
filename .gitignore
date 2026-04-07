@@ -4,3 +4,11 @@ out/
 *.ilk
 *.exp
 *.lib
+.idea/
+.serena/
+**/.env
+**/.credential
+**/*.exe
+**/*.local.*
+**/*.local
+LICENSE.txt
