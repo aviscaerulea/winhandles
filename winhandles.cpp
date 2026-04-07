@@ -321,14 +321,7 @@ static std::vector<BYTE> EnumerateHandles()
 // =============================================
 static std::string FormatCount(ULONG n)
 {
-    std::ostringstream ss;
-    if (n >= 1000000)
-        ss << std::fixed << std::setprecision(1) << n / 1000000.0 << "m";
-    else if (n >= 1000)
-        ss << static_cast<ULONG>(std::round(n / 1000.0)) << "k";
-    else
-        ss << n;
-    return ss.str();
+    return std::to_string(n);
 }
 
 // =============================================
