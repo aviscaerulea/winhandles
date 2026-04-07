@@ -19,6 +19,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -259,27 +260,33 @@ struct ProcessInfo {
 };
 
 // =============================================
-// プロセス名の取得（ベースファイル名）
+// プロセス名マップの構築（PID → プロセス名）
+//
+// CreateToolhelp32Snapshot を使用するため OpenProcess が不要。
+// Protected Process Light（PPL）プロセスでも名前を取得できる。
 // =============================================
-static std::wstring GetProcessName(DWORD pid)
+using ProcessNameMap = std::unordered_map<DWORD, std::wstring>;
+
+static ProcessNameMap BuildProcessNameMap()
 {
-    if (pid == 0) return L"Idle";
-    if (pid == 4) return L"System";
+    ProcessNameMap result;
+    result[0] = L"Idle";
+    result[4] = L"System";
 
-    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!proc) return L"<access denied>";
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return result;
 
-    WCHAR  path[MAX_PATH] = {};
-    DWORD  len = MAX_PATH;
-    if (QueryFullProcessImageNameW(proc, 0, path, &len)) {
-        CloseHandle(proc);
-        std::wstring full(path, len);
-        auto pos = full.rfind(L'\\');
-        return (pos != std::wstring::npos) ? full.substr(pos + 1) : full;
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(entry);
+
+    if (Process32FirstW(snap, &entry)) {
+        do {
+            result[entry.th32ProcessID] = entry.szExeFile;
+        } while (Process32NextW(snap, &entry));
     }
 
-    CloseHandle(proc);
-    return L"<unknown>";
+    CloseHandle(snap);
+    return result;
 }
 
 // =============================================
@@ -373,23 +380,59 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
 }
 
 // =============================================
-// --pid モード：指定プロセスの詳細出力
+// --pid モード：PPL フォールバック付き型別カウント表示
 //
-// ハンドルを 1 件ずつ複製してオブジェクト名を取得する。
-// 名前付きパイプ等でのデッドロックは SafeQueryObjectName で保護。
+// OpenProcess(PROCESS_DUP_HANDLE) が成功した場合：
+//   ハンドルを複製してオブジェクト名まで表示する
+// 失敗した場合（PPL 等の保護プロセス）：
+//   ハンドル複製をスキップし、枚挙済みデータから型別カウントのみ表示
 // =============================================
 static void PrintProcessDetail(DWORD targetPid,
                                 const SYSTEM_HANDLE_INFORMATION_EX* info,
-                                TypeNameCache& typeCache)
+                                TypeNameCache& typeCache,
+                                const ProcessNameMap& procNameMap)
 {
+    auto nameIt = procNameMap.find(targetPid);
+    std::wstring procName = (nameIt != procNameMap.end())
+        ? nameIt->second : L"<unknown>";
+
     HANDLE srcProc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, targetPid);
+
     if (!srcProc) {
-        std::cerr << "プロセス " << targetPid
-                  << " を開けなかった（管理者権限が必要）\n";
+        // PPL または保護プロセス → 型別カウントのみ表示
+        std::cout << "\n[PID " << targetPid << " : " << WToU8(procName)
+                  << " の詳細]（保護プロセスのためオブジェクト名は取得不可）\n";
+        std::cout << std::string(60, '=') << "\n\n";
+
+        std::map<std::wstring, ULONG> typeCount;
+        for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i) {
+            const auto& entry = info->Handles[i];
+            if (static_cast<DWORD>(entry.UniqueProcessId) != targetPid) continue;
+            auto it = typeCache.find(entry.ObjectTypeIndex);
+            std::wstring tn = (it != typeCache.end()) ? it->second : L"Unknown";
+            typeCount[tn]++;
+        }
+
+        // 降順ソート
+        std::vector<std::pair<ULONG, std::wstring>> sorted;
+        for (auto& kv : typeCount)
+            sorted.emplace_back(kv.second, kv.first);
+        std::sort(sorted.begin(), sorted.end(), std::greater<>());
+
+        std::cout << std::right << std::setw(10) << "件数"
+                  << "  型名\n";
+        std::cout << std::string(10, '-') << "  " << std::string(20, '-') << "\n";
+        for (auto& [cnt, type] : sorted) {
+            std::cout << std::right << std::setw(10) << cnt
+                      << "  " << WToU8(type) << "\n";
+        }
+        std::cout << "\n";
         return;
     }
 
-    std::wstring procName = GetProcessName(targetPid);
+    // 通常プロセス → ハンドル複製してオブジェクト名まで取得
+    std::cout << "\n[PID " << targetPid << " : " << WToU8(procName) << " の詳細]\n";
+    std::cout << std::string(60, '=') << "\n";
 
     // 型名 → [オブジェクト名, ...] のマッピング
     std::map<std::wstring, std::vector<std::wstring>> typeToNames;
@@ -415,10 +458,6 @@ static void PrintProcessDetail(DWORD targetPid,
     }
 
     CloseHandle(srcProc);
-
-    // 出力
-    std::cout << "\n[PID " << targetPid << " : " << WToU8(procName) << " の詳細]\n";
-    std::cout << std::string(60, '=') << "\n";
 
     // ハンドル数降順でソート
     std::vector<std::pair<size_t, std::wstring>> sorted;
@@ -682,9 +721,12 @@ int main(int argc, char* argv[])
         pi.typeCount[tn]++;
     }
 
-    // プロセス名の解決
-    for (auto& [pid, pi] : pidMap)
-        pi.name = GetProcessName(pid);
+    // プロセス名の解決（スナップショット方式）
+    auto procNameMap = BuildProcessNameMap();
+    for (auto& [pid, pi] : pidMap) {
+        auto it = procNameMap.find(pid);
+        pi.name = (it != procNameMap.end()) ? it->second : L"<unknown>";
+    }
 
     // ハンドル数降順でソート
     std::vector<ProcessInfo> sorted;
@@ -698,7 +740,7 @@ int main(int argc, char* argv[])
 
     // --- 出力 ---
     if (pidMode > 0) {
-        PrintProcessDetail(pidMode, info, typeCache);
+        PrintProcessDetail(pidMode, info, typeCache, procNameMap);
         if (pidMode == 4)
             PrintSystemDriverBreakdown(info, typeCache);
     }
