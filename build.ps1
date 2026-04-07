@@ -37,7 +37,8 @@ $clArgs = @(
     "/Fe:$outExe",
     "/link",
     "/SUBSYSTEM:WINDOWS", "/ENTRY:mainCRTStartup",
-    "psapi.lib", "advapi32.lib", "shell32.lib"
+    "/MANIFEST:EMBED", "/MANIFESTUAC:NO", "/MANIFESTINPUT:winhandles.manifest",
+    "psapi.lib", "advapi32.lib"
 )
 
 Write-Host "[ビルド] cl.exe $($clArgs -join ' ')"
