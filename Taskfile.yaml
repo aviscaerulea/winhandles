@@ -1,0 +1,35 @@
+# vim: set ft=yaml fenc=utf-8 ff=unix sw=2 ts=2 et :
+$schema: https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  # バージョンは git タグから動的取得（タグなし時はコミットハッシュにフォールバック）
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  OUT_DIR: '{{.OUT_DIR | default "out"}}'
+
+tasks:
+  default:
+    desc: クリーンビルドを実行する
+    cmds:
+      - task: clean
+      - task: build
+
+  build:
+    desc: アプリケーションをビルドする
+    cmds:
+      - pwsh -ExecutionPolicy Bypass -File build.ps1 -OutDir {{.OUT_DIR}} -Version {{.VERSION}}
+    sources:
+      - winhandles.cpp
+      - build.ps1
+    generates:
+      - '{{.OUT_DIR}}/winhandles.exe'
+
+  clean:
+    desc: ビルド成果物を削除する
+    preconditions:
+      - sh: '[ "{{.OUT_DIR}}" != "" ] && [ "{{.OUT_DIR}}" != "/" ]'
+        msg: "OUT_DIR が空またはルートディレクトリだ"
+    cmds:
+      - rm -rf {{.OUT_DIR}}
+      - mkdir -p {{.OUT_DIR}}
