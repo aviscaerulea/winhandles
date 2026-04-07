@@ -28,6 +28,7 @@ $outExe = Join-Path $OutDir "winhandles.exe"
 
 $clArgs = @(
     "/utf-8", "/EHsc", "/O2", "/W4", "/WX", "/nologo", "/std:c++17",
+    "/DVERSION_STR=\`"$Version\`"",
     "winhandles.cpp",
     "/Fe:$outExe",
     "/link",
