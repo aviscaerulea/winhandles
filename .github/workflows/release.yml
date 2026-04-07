@@ -1,0 +1,37 @@
+# vim: set ft=yaml fenc=utf-8 ff=unix sw=2 ts=2 et :
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          pwsh -ExecutionPolicy Bypass -File build.ps1 -OutDir out -Version $version
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          Compress-Archive -Path "out/winhandles.exe" `
+            -DestinationPath "out/winhandles-${version}-x64.zip" -Force
+
+      - name: Upload artifact to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          gh release upload "$version" "out/winhandles-${version}-x64.zip"

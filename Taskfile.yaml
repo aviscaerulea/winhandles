@@ -25,6 +25,18 @@ tasks:
     generates:
       - '{{.OUT_DIR}}/winhandles.exe'
 
+  release:
+    desc: クリーンビルドして zip に圧縮する
+    preconditions:
+      - sh: 'test -z "$(git status --porcelain)"'
+        msg: "未コミットの変更があります。コミットしてから実行してください。"
+      - sh: 'git describe --tags --exact-match HEAD 2>/dev/null'
+        msg: "HEAD にリリースタグがありません。タグを付けてから実行してください。"
+    cmds:
+      - task: clean
+      - task: build
+      - pwsh -Command "Compress-Archive -Path '{{.OUT_DIR}}/winhandles.exe' -DestinationPath '{{.OUT_DIR}}/winhandles-{{.VERSION}}-x64.zip' -Force"
+
   clean:
     desc: ビルド成果物を削除する
     preconditions:
