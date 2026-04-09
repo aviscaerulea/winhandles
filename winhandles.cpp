@@ -256,6 +256,7 @@ struct ProcessInfo {
     DWORD        pid;
     std::wstring name;
     ULONG        totalHandles;
+    ULONG        threadCount = 0;
     std::map<std::wstring, ULONG> typeCount; // 型名 → ハンドル数
 };
 
@@ -290,6 +291,31 @@ static ProcessNameMap BuildProcessNameMap()
 }
 
 // =============================================
+// スレッド数マップの構築（PID → スレッド数）
+// =============================================
+using ThreadCountMap = std::unordered_map<DWORD, ULONG>;
+
+static ThreadCountMap BuildThreadCountMap()
+{
+    ThreadCountMap result;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return result;
+
+    THREADENTRY32 entry;
+    entry.dwSize = sizeof(entry);
+
+    if (Thread32First(snap, &entry)) {
+        do {
+            result[entry.th32OwnerProcessID]++;
+        } while (Thread32Next(snap, &entry));
+    }
+
+    CloseHandle(snap);
+    return result;
+}
+
+// =============================================
 // 全ハンドルの列挙（バッファを自動拡張）
 // =============================================
 static std::vector<BYTE> EnumerateHandles()
@@ -317,14 +343,6 @@ static std::vector<BYTE> EnumerateHandles()
 }
 
 // =============================================
-// 数値を k/m 単位に変換
-// =============================================
-static std::string FormatCount(ULONG n)
-{
-    return std::to_string(n);
-}
-
-// =============================================
 // トップ N レポートの出力
 // =============================================
 static void PrintReport(const std::vector<ProcessInfo>& procs,
@@ -334,31 +352,57 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
 {
     size_t limit = showAll ? procs.size() : std::min(topN, procs.size());
 
-    std::cout << "\nハンドルレポート（合計：" << totalHandles
-              << " / " << procs.size() << " プロセス）\n";
-    std::cout << std::string(72, '=') << "\n";
+    std::cout << "\nHandle report  total:" << totalHandles
+              << "  processes:" << procs.size() << "\n";
+    std::cout << std::string(100, '=') << "\n";
+    // ヘッダは半角英字で統一して setw のズレを回避する
     std::cout << std::right << std::setw(6)  << "PID"
-              << "  " << std::left  << std::setw(28) << "プロセス名"
-              << std::right << std::setw(10) << "ハンドル数"
-              << "  主要な型\n";
+              << "  " << std::left  << std::setw(28) << "Name"
+              << std::right << std::setw(10) << "Total"
+              << std::right << std::setw(8)  << "File"
+              << std::right << std::setw(8)  << "Process"
+              << std::right << std::setw(8)  << "Thread"
+              << std::right << std::setw(10) << "Handle"
+              << std::right << std::setw(8)  << "Event"
+              << "  Other(TOP3)\n";
     std::cout << std::string(6,  '-') << "  "
               << std::string(28, '-') << "  "
-              << std::string(10, '-') << "  "
-              << std::string(24, '-') << "\n";
+              << std::string(8,  '-') << "  "
+              << std::string(6,  '-') << "  "
+              << std::string(7,  '-') << "  "
+              << std::string(6,  '-') << "  "
+              << std::string(8,  '-') << "  "
+              << std::string(5,  '-') << "  "
+              << std::string(30, '-') << "\n";
 
     for (size_t i = 0; i < limit; ++i) {
         const auto& p = procs[i];
 
-        // 型別上位 3 件を文字列化
-        std::vector<std::pair<ULONG, std::wstring>> types;
-        for (auto& kv : p.typeCount)
-            types.emplace_back(kv.second, kv.first);
-        std::sort(types.begin(), types.end(), std::greater<>());
+        // 固定 3 型の件数を取得
+        auto findCount = [&](const wchar_t* key) -> ULONG {
+            auto it = p.typeCount.find(key);
+            return (it != p.typeCount.end()) ? it->second : 0;
+        };
+        ULONG fileC = findCount(L"File");
+        ULONG procC = findCount(L"Process");
+        ULONG evtC  = findCount(L"Event");
 
-        std::ostringstream typeStr;
-        for (size_t t = 0; t < std::min<size_t>(3, types.size()); ++t) {
-            if (t > 0) typeStr << " ";
-            typeStr << WToU8(types[t].second) << "(" << FormatCount(types[t].first) << ")";
+        // 残り型（File/Process/Event 以外）を件数降順で収集して "Name:Count" 形式に連結
+        std::vector<std::pair<ULONG, std::wstring>> others;
+        for (auto& kv : p.typeCount) {
+            if (kv.first == L"File" || kv.first == L"Process" ||
+                kv.first == L"Event")
+                continue;
+            others.emplace_back(kv.second, kv.first);
+        }
+        std::sort(others.begin(), others.end(), std::greater<>());
+
+        // 上位 3 件のみ表示
+        std::ostringstream otherStr;
+        size_t otherLimit = std::min<size_t>(3, others.size());
+        for (size_t j = 0; j < otherLimit; ++j) {
+            if (j > 0) otherStr << " ";
+            otherStr << WToU8(others[j].second) << ":" << others[j].first;
         }
 
         // setw はバイト数ではなく文字数でパディングするため、日本語プロセス名が
@@ -367,7 +411,12 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
         std::cout << std::right << std::setw(6)  << p.pid
                   << "  " << std::left  << std::setw(28) << name8
                   << std::right << std::setw(10) << p.totalHandles
-                  << "  " << typeStr.str() << "\n";
+                  << std::right << std::setw(8)  << fileC
+                  << std::right << std::setw(8)  << procC
+                  << std::right << std::setw(8)  << p.threadCount
+                  << std::right << std::setw(10) << p.totalHandles
+                  << std::right << std::setw(8)  << evtC
+                  << "  " << otherStr.str() << "\n";
     }
     std::cout << "\n";
 }
@@ -383,17 +432,21 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
 static void PrintProcessDetail(DWORD targetPid,
                                 const SYSTEM_HANDLE_INFORMATION_EX* info,
                                 TypeNameCache& typeCache,
-                                const ProcessNameMap& procNameMap)
+                                const ProcessNameMap& procNameMap,
+                                ULONG threadCount)
 {
     auto nameIt = procNameMap.find(targetPid);
     std::wstring procName = (nameIt != procNameMap.end())
         ? nameIt->second : L"<unknown>";
+
+    ULONG thrCnt = threadCount;
 
     HANDLE srcProc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, targetPid);
 
     if (!srcProc) {
         // PPL または保護プロセス → 型別カウントのみ表示
         std::cout << "\n[PID " << targetPid << " : " << WToU8(procName)
+                  << "  スレッド:" << thrCnt
                   << " の詳細]（保護プロセスのためオブジェクト名は取得不可）\n";
         std::cout << std::string(60, '=') << "\n\n";
 
@@ -424,7 +477,8 @@ static void PrintProcessDetail(DWORD targetPid,
     }
 
     // 通常プロセス → ハンドル複製してオブジェクト名まで取得
-    std::cout << "\n[PID " << targetPid << " : " << WToU8(procName) << " の詳細]\n";
+    std::cout << "\n[PID " << targetPid << " : " << WToU8(procName)
+              << "  スレッド:" << thrCnt << " の詳細]\n";
     std::cout << std::string(60, '=') << "\n";
 
     // 型名 → [オブジェクト名, ...] のマッピング
@@ -607,6 +661,15 @@ static void PrintHelp()
 // =============================================
 int main(int argc, char* argv[])
 {
+    // WINDOWS サブシステムのため親プロセスのコンソールに明示的に接続し
+    // stdout/stderr を CONOUT$ に紐付ける。
+    // UAC 昇格後は親が変わるため AttachConsole が失敗する場合がある。
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* dummy;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        freopen_s(&dummy, "CONOUT$", "w", stderr);
+    }
+
     // UTF-8 出力設定（コンソール・パイプどちらも正しく出力される）
     SetConsoleOutputCP(CP_UTF8);
 
@@ -714,11 +777,15 @@ int main(int argc, char* argv[])
         pi.typeCount[tn]++;
     }
 
-    // プロセス名の解決（スナップショット方式）
-    auto procNameMap = BuildProcessNameMap();
+    // プロセス名・スレッド数の解決（スナップショット方式）
+    auto procNameMap    = BuildProcessNameMap();
+    auto threadCountMap = BuildThreadCountMap();
     for (auto& [pid, pi] : pidMap) {
-        auto it = procNameMap.find(pid);
-        pi.name = (it != procNameMap.end()) ? it->second : L"<unknown>";
+        auto nameIt = procNameMap.find(pid);
+        pi.name = (nameIt != procNameMap.end()) ? nameIt->second : L"<unknown>";
+
+        auto thrIt = threadCountMap.find(pid);
+        pi.threadCount = (thrIt != threadCountMap.end()) ? thrIt->second : 0;
     }
 
     // ハンドル数降順でソート
@@ -733,7 +800,9 @@ int main(int argc, char* argv[])
 
     // --- 出力 ---
     if (pidMode > 0) {
-        PrintProcessDetail(pidMode, info, typeCache, procNameMap);
+        auto thrIt = threadCountMap.find(pidMode);
+        ULONG pidThreadCount = (thrIt != threadCountMap.end()) ? thrIt->second : 0;
+        PrintProcessDetail(pidMode, info, typeCache, procNameMap, pidThreadCount);
         if (pidMode == 4)
             PrintSystemDriverBreakdown(info, typeCache);
     }
