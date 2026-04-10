@@ -6,6 +6,7 @@ out/
 *.lib
 .idea/
 .serena/
+.claude/
 **/.env
 **/.credential
 **/*.exe
