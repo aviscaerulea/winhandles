@@ -5,33 +5,46 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
-    permissions:
-      contents: write
-
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name }}
+      APP_NAME: winhandles
+      ARCH: x64
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build release binary
+      - name: Extract version from tag
         shell: pwsh
         run: |
-          $version = "${{ github.event.release.tag_name }}"
-          pwsh -ExecutionPolicy Bypass -File build.ps1 -OutDir out -Version $version
+          $version = $env:TAG_NAME -replace '^v', ''
+          echo "VERSION=$version" >> $env:GITHUB_ENV
 
-      - name: Create zip archive
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ env.ARCH }}
+
+      - name: Build (Release)
+        shell: pwsh
+        run: pwsh -NoProfile -File build.ps1 -Version $env:VERSION
+
+      - name: Create zip package
         shell: pwsh
         run: |
-          $version = "${{ github.event.release.tag_name }}"
-          Compress-Archive -Path "out/winhandles.exe" `
-            -DestinationPath "out/winhandles-${version}-x64.zip" -Force
+          $zipName = "$env:APP_NAME-$env:TAG_NAME-$env:ARCH.zip"
+          $files = @("out/$env:APP_NAME.exe")
+          if (Test-Path "$env:APP_NAME.toml") { $files += "$env:APP_NAME.toml" }
+          Compress-Archive -Path $files -DestinationPath "out/$zipName" -Force
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
-      - name: Upload artifact to release
+      - name: Upload release asset
         shell: bash
+        run: gh release upload "$TAG_NAME" "out/$ZIP_NAME" --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          version="${{ github.event.release.tag_name }}"
-          gh release upload "$version" "out/winhandles-${version}-x64.zip"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIP_NAME: ${{ env.ZIP_NAME }}
