@@ -358,20 +358,18 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
     // ヘッダは半角英字で統一して setw のズレを回避する
     std::cout << std::right << std::setw(6)  << "PID"
               << "  " << std::left  << std::setw(28) << "Name"
-              << std::right << std::setw(10) << "Total"
+              << std::right << std::setw(16) << "Total(=Handles)"
               << std::right << std::setw(8)  << "File"
               << std::right << std::setw(8)  << "Process"
               << std::right << std::setw(8)  << "Thread"
-              << std::right << std::setw(10) << "Handle"
               << std::right << std::setw(8)  << "Event"
               << "  Other(TOP3)\n";
     std::cout << std::string(6,  '-') << "  "
               << std::string(28, '-') << "  "
-              << std::string(8,  '-') << "  "
+              << std::string(14, '-') << "  "
               << std::string(6,  '-') << "  "
               << std::string(7,  '-') << "  "
               << std::string(6,  '-') << "  "
-              << std::string(8,  '-') << "  "
               << std::string(5,  '-') << "  "
               << std::string(30, '-') << "\n";
 
@@ -410,11 +408,10 @@ static void PrintReport(const std::vector<ProcessInfo>& procs,
         std::string name8 = WToU8(p.name.substr(0, 28));
         std::cout << std::right << std::setw(6)  << p.pid
                   << "  " << std::left  << std::setw(28) << name8
-                  << std::right << std::setw(10) << p.totalHandles
+                  << std::right << std::setw(16) << p.totalHandles
                   << std::right << std::setw(8)  << fileC
                   << std::right << std::setw(8)  << procC
                   << std::right << std::setw(8)  << p.threadCount
-                  << std::right << std::setw(10) << p.totalHandles
                   << std::right << std::setw(8)  << evtC
                   << "  " << otherStr.str() << "\n";
     }
